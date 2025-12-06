@@ -4,7 +4,7 @@ import numpy as np
 import yfinance as yf
 import matplotlib.pyplot as plt
 
-# =============== Backtest core ===============
+# =============== Core ===============
 
 DEFAULT_WEIGHTS = {
     "MSFT": 0.15,
@@ -14,7 +14,7 @@ DEFAULT_WEIGHTS = {
     "DSI": 0.20,
     "ICLN": 0.10,
     "ARKK": 0.10,
-    "SHY": 0.20,   # proxy for short-term Treasuries
+    "SHY": 0.20,   # short-term Treasuries proxy
 }
 
 def download_price_data(tickers, start, end):
@@ -26,7 +26,6 @@ def download_price_data(tickers, start, end):
         progress=False
     )
 
-    # Handle MultiIndex columns
     if isinstance(df.columns, pd.MultiIndex):
         if "Adj Close" in df.columns.get_level_values(0):
             data = df["Adj Close"]
@@ -51,7 +50,6 @@ def performance_stats(port_ret, rf_rate=0.02):
     n_days = port_ret.shape[0]
     total_return = (1 + port_ret).prod() - 1
     ann_return = (1 + total_return) ** (252 / n_days) - 1
-
     ann_vol = port_ret.std() * np.sqrt(252)
 
     ann_rf = rf_rate
@@ -71,38 +69,33 @@ def performance_stats(port_ret, rf_rate=0.02):
 
     stats = {
         "Total Return": total_return,
-        "Annualized Return (CAGR)": ann_return,
-        "Annualized Volatility": ann_vol,
-        "Sharpe Ratio": sharpe,
-        "Sortino Ratio": sortino,
-        "Max Drawdown": max_dd
+        "CAGR": ann_return,
+        "Vol": ann_vol,
+        "Sharpe": sharpe,
+        "Sortino": sortino,
+        "MaxDD": max_dd
     }
     return stats, cum_value, drawdown
 
-# =============== Streamlit UI ===============
+# =============== UI ===============
 
 st.set_page_config(
-    page_title="Wharton Portfolio Backtest",
+    page_title="Portfolio Backtest",
     page_icon=None,
     layout="wide",
 )
 
-st.title("Wharton Investment Portfolio Backtest")
+st.title("Portfolio Backtest")
 
-st.markdown(
-    "This dashboard backtests our Wharton Investment Portfolio and "
-    "shows annualized return, volatility, Sharpe, Sortino and maximum drawdown."
-)
+# Sidebar
+st.sidebar.header("Params")
 
-# ---- Sidebar: parameters ----
-st.sidebar.header("Backtest Parameters")
-
-start_date = st.sidebar.date_input("Start date", value=pd.to_datetime("2015-01-01"))
-end_date = st.sidebar.date_input("End date (optional)", value=pd.to_datetime("today"))
-use_end = st.sidebar.checkbox("Use end date?", value=True)
+start_date = st.sidebar.date_input("Start", value=pd.to_datetime("2015-01-01"))
+end_date = st.sidebar.date_input("End", value=pd.to_datetime("today"))
+use_end = st.sidebar.checkbox("Use end", value=True)
 
 rf_rate = st.sidebar.number_input(
-    "Risk-free rate (annual, e.g. 0.02)",
+    "rf",
     min_value=-0.05,
     max_value=0.10,
     value=0.02,
@@ -111,13 +104,13 @@ rf_rate = st.sidebar.number_input(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("Portfolio Weights")
+st.sidebar.subheader("Weights")
 
 weight_inputs = {}
 total_w = 0.0
 for ticker, w in DEFAULT_WEIGHTS.items():
     val = st.sidebar.number_input(
-        f"{ticker} weight",
+        ticker,
         min_value=0.0,
         max_value=1.0,
         value=float(w),
@@ -127,21 +120,19 @@ for ticker, w in DEFAULT_WEIGHTS.items():
     weight_inputs[ticker] = val
     total_w += val
 
-st.sidebar.write(f"Sum of weights (before normalize): {total_w:.3f}")
+st.sidebar.write(f"Sum: {total_w:.3f}")
 
-normalize = st.sidebar.checkbox("Normalize weights to 1.0", value=True)
+normalize = st.sidebar.checkbox("Norm to 1", value=True)
 
-run = st.sidebar.button("Run Backtest")
+run = st.sidebar.button("Run")
 
 if run:
-    # normalize weights if needed
     weights = weight_inputs.copy()
     if normalize and total_w > 0:
         for t in weights:
             weights[t] /= total_w
 
-    # main backtest
-    with st.spinner("Downloading data and running backtest..."):
+    with st.spinner("Running..."):
         try:
             prices = download_price_data(
                 weights.keys(),
@@ -151,73 +142,58 @@ if run:
             _, port_daily_ret = compute_portfolio_returns(prices, weights)
             stats, cum_value, drawdown = performance_stats(port_daily_ret, rf_rate)
         except Exception as e:
-            st.error(f"Error during backtest: {e}")
+            st.error(f"Error: {e}")
         else:
             st.success(
-                f"Backtest period: {prices.index[0].date()} to {prices.index[-1].date()}"
+                f"{prices.index[0].date()} → {prices.index[-1].date()}"
             )
 
-            # ---- KPI cards ----
-            st.subheader("Performance Summary")
+            # KPIs
+            st.subheader("Stats")
 
             col1, col2, col3 = st.columns(3)
             col4, col5 = st.columns(2)
 
-            col1.metric(
-                "Annualized Return (CAGR)",
-                f"{stats['Annualized Return (CAGR)']*100:,.2f} %"
-            )
-            col2.metric(
-                "Annualized Volatility",
-                f"{stats['Annualized Volatility']*100:,.2f} %"
-            )
-            col3.metric(
-                "Sharpe Ratio",
-                f"{stats['Sharpe Ratio']:,.2f}"
-            )
-            col4.metric(
-                "Sortino Ratio",
-                f"{stats['Sortino Ratio']:,.2f}"
-            )
-            col5.metric(
-                "Maximum Drawdown",
-                f"{stats['Max Drawdown']*100:,.2f} %"
-            )
+            col1.metric("CAGR", f"{stats['CAGR']*100:,.2f} %")
+            col2.metric("Vol", f"{stats['Vol']*100:,.2f} %")
+            col3.metric("Sharpe", f"{stats['Sharpe']:,.2f}")
+            col4.metric("Sortino", f"{stats['Sortino']:,.2f}")
+            col5.metric("MaxDD", f"{stats['MaxDD']*100:,.2f} %")
 
             st.markdown("---")
 
-            # ---- Charts ----
+            # Charts
             left, right = st.columns(2)
 
             with left:
-                st.markdown("#### Equity Curve – Growth of $1")
+                st.markdown("Equity")
                 st.line_chart(cum_value)
 
             with right:
-                st.markdown("#### Drawdown")
+                st.markdown("Drawdown")
                 st.area_chart(drawdown)
 
-            # ---- Show weights + stats table for report ----
+            # Weights + table
             st.markdown("---")
-            st.subheader("Current Portfolio Weights")
-            w_df = pd.DataFrame.from_dict(weights, orient="index", columns=["Weight"])
-            w_df["Weight (%)"] = w_df["Weight"] * 100
-            st.dataframe(w_df.style.format({"Weight": "{:.3f}", "Weight (%)": "{:.2f}"}))
+            st.subheader("Weights")
+            w_df = pd.DataFrame.from_dict(weights, orient="index", columns=["w"])
+            w_df["w(%)"] = w_df["w"] * 100
+            st.dataframe(w_df.style.format({"w": "{:.3f}", "w(%)": "{:.2f}"}))
 
-            st.subheader("Performance Table (for report)")
+            st.subheader("Table")
             table_df = pd.DataFrame(
                 {
                     "Metric": list(stats.keys()),
                     "Value": [
                         f"{stats['Total Return']*100:,.2f} %",
-                        f"{stats['Annualized Return (CAGR)']*100:,.2f} %",
-                        f"{stats['Annualized Volatility']*100:,.2f} %",
-                        f"{stats['Sharpe Ratio']:,.2f}",
-                        f"{stats['Sortino Ratio']:,.2f}",
-                        f"{stats['Max Drawdown']*100:,.2f} %",
+                        f"{stats['CAGR']*100:,.2f} %",
+                        f"{stats['Vol']*100:,.2f} %",
+                        f"{stats['Sharpe']:,.2f}",
+                        f"{stats['Sortino']:,.2f}",
+                        f"{stats['MaxDD']*100:,.2f} %",
                     ],
                 }
             )
             st.table(table_df)
 else:
-    st.info("Set your parameters in the sidebar and click “Run Backtest” to start.")
+    st.info("Set params and click Run.")
