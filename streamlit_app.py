@@ -16,7 +16,10 @@ DEFAULT_WEIGHTS = {
     "SHY": 0.20,   # short-term Treasuries proxy
 }
 
+
+@st.cache_data
 def download_price_data(tickers, start, end):
+    """抓價格資料並回傳 Adj Close"""
     df = yf.download(
         list(tickers),
         start=start,
@@ -38,6 +41,7 @@ def download_price_data(tickers, start, end):
 
     return data.dropna(how="all")
 
+
 def compute_portfolio_returns(price_df, weights_dict):
     weights = pd.Series(weights_dict)
     price_df = price_df[weights.index]
@@ -45,8 +49,9 @@ def compute_portfolio_returns(price_df, weights_dict):
     port_daily_ret = (daily_ret * weights).sum(axis=1)
     return daily_ret, port_daily_ret
 
+
 def performance_stats(port_ret, rf_rate=0.02):
-    # 防呆：沒有資料
+    """整體績效指標"""
     if port_ret is None or port_ret.empty:
         empty_stats = {
             "Total Return": 0.0,
@@ -100,14 +105,25 @@ def performance_stats(port_ret, rf_rate=0.02):
     }
     return stats, cum_value, drawdown
 
+
 def yearly_returns(port_ret):
-    """每一年的報酬（單年 CAGR = 該年總報酬）"""
+    """每年報酬（單年 CAGR）"""
     if port_ret is None or port_ret.empty:
         return pd.Series(dtype=float)
     df = port_ret.to_frame("r")
     df["year"] = df.index.year
     yr = df.groupby("year")["r"].apply(lambda x: (1 + x).prod() - 1)
     return yr
+
+
+def downsample(series, max_points=400):
+    """下採樣：限制點數，讓圖比較順"""
+    s = series.dropna()
+    if len(s) <= max_points:
+        return s
+    step = int(np.ceil(len(s) / max_points))
+    return s.iloc[::step]
+
 
 # =============== UI ===============
 
@@ -159,6 +175,7 @@ normalize = st.sidebar.checkbox("Norm to 1", value=True)
 run = st.sidebar.button("Run")
 
 if run:
+    # 權重處理
     weights = weight_inputs.copy()
     if normalize and total_w > 0:
         for t in weights:
@@ -167,87 +184,96 @@ if run:
     with st.spinner("Running..."):
         try:
             prices = download_price_data(
-                weights.keys(),
+                tuple(weights.keys()),
                 start_date,
                 end_date if use_end else None
             )
+            if prices.empty:
+                raise ValueError("No price data.")
             _, port_daily_ret = compute_portfolio_returns(prices, weights)
             stats, cum_value, drawdown = performance_stats(port_daily_ret, rf_rate)
             yr_ret = yearly_returns(port_daily_ret)
         except Exception as e:
             st.error(f"Error: {e}")
         else:
-            if prices.empty:
-                st.error("No price data. Check dates or tickers.")
+            st.success(
+                f"{prices.index[0].date()} → {prices.index[-1].date()}"
+            )
+
+            # ========= Summary stats =========
+            st.subheader("Stats")
+
+            col1, col2, col3 = st.columns(3)
+            col4, col5 = st.columns(2)
+
+            col1.metric("CAGR", f"{stats['CAGR']*100:,.2f} %")
+            col2.metric("Vol", f"{stats['Vol']*100:,.2f} %")
+            col3.metric("Sharpe", f"{stats['Sharpe']:,.2f}")
+            col4.metric("Sortino", f"{stats['Sortino']:,.2f}")
+            col5.metric("MaxDD", f"{stats['MaxDD']*100:,.2f} %")
+
+            st.markdown("---")
+
+            # ========= Equity & Drawdown (優化過) =========
+            left, right = st.columns(2)
+
+            # 先決定是否用週資料
+            days = (cum_value.index[-1] - cum_value.index[0]).days
+            if days > 3 * 365:
+                cum_plot = cum_value.resample("W").last()
+                dd_plot = drawdown.resample("W").last()
             else:
-                st.success(
-                    f"{prices.index[0].date()} → {prices.index[-1].date()}"
-                )
+                cum_plot = cum_value
+                dd_plot = drawdown
 
-                # KPIs
-                st.subheader("Stats")
+            # 再下採樣
+            cum_plot = downsample(cum_plot, max_points=400)
+            dd_plot = downsample(dd_plot, max_points=400)
 
-                col1, col2, col3 = st.columns(3)
-                col4, col5 = st.columns(2)
+            with left:
+                st.markdown("Equity")
+                st.line_chart(cum_plot.to_frame("Equity"))
 
-                col1.metric("CAGR", f"{stats['CAGR']*100:,.2f} %")
-                col2.metric("Vol", f"{stats['Vol']*100:,.2f} %")
-                col3.metric("Sharpe", f"{stats['Sharpe']:,.2f}")
-                col4.metric("Sortino", f"{stats['Sortino']:,.2f}")
-                col5.metric("MaxDD", f"{stats['MaxDD']*100:,.2f} %")
+            with right:
+                st.markdown("Drawdown")
+                st.area_chart(dd_plot.to_frame("DD"))
 
-                st.markdown("---")
+            # ========= Weights =========
+            st.markdown("---")
+            st.subheader("Weights")
+            w_df = pd.DataFrame.from_dict(weights, orient="index", columns=["w"])
+            w_df["w(%)"] = w_df["w"] * 100
+            st.dataframe(w_df.style.format({"w": "{:.3f}", "w(%)": "{:.2f}"}))
 
-                # Charts
-                left, right = st.columns(2)
+            # ========= Yearly returns + 選年份 =========
+            st.subheader("Year returns")
+            if not yr_ret.empty:
+                year_list = list(yr_ret.index)
+                year_sel = st.selectbox("Year", options=year_list)
+                year_cagr = yr_ret.loc[year_sel]
+                st.write(f"{year_sel} CAGR: {year_cagr*100:.2f} %")
 
-                with left:
-                    st.markdown("Equity")
-                    st.line_chart(cum_value)
+                yr_df = yr_ret.to_frame("Return")
+                yr_df["Return(%)"] = yr_df["Return"] * 100
+                st.table(yr_df.style.format({"Return": "{:.4f}", "Return(%)": "{:.2f}"}))
+            else:
+                st.info("No yearly data.")
 
-                with right:
-                    st.markdown("Drawdown")
-                    st.area_chart(drawdown)
-
-                st.markdown("---")
-                st.subheader("Weights")
-                w_df = pd.DataFrame.from_dict(weights, orient="index", columns=["w"])
-                w_df["w(%)"] = w_df["w"] * 100
-                st.dataframe(w_df.style.format({"w": "{:.3f}", "w(%)": "{:.2f}"}))
-
-                # ===== 每年報酬 + 選擇年份的 CAGR =====
-                st.subheader("Year returns")
-
-                if not yr_ret.empty:
-                    # 下拉選年份
-                    year_list = list(yr_ret.index)
-                    year_sel = st.selectbox("Year", options=year_list)
-
-                    year_cagr = yr_ret.loc[year_sel]
-                    st.write(f"{year_sel} CAGR: {year_cagr*100:.2f} %")
-
-                    # 顯示全部年份表格
-                    yr_df = yr_ret.to_frame("Return")
-                    yr_df["Return(%)"] = yr_df["Return"] * 100
-                    st.table(yr_df.style.format({"Return": "{:.4f}", "Return(%)": "{:.2f}"}))
-                else:
-                    st.info("No yearly data.")
-
-                # 總表
-                st.subheader("Table")
-                table_df = pd.DataFrame(
-                    {
-                        "Metric": list(stats.keys()),
-                        "Value": [
-                            f"{stats['Total Return']*100:,.2f} %",
-                            f"{stats['CAGR']*100:,.2f} %",
-                            f"{stats['Vol']*100:,.2f} %",
-                            f"{stats['Sharpe']:,.2f}",
-                            f"{stats['Sortino']:,.2f}",
-                            f"{stats['MaxDD']*100:,.2f} %",
-                        ],
-                    }
-                )
-                st.table(table_df)
+            # ========= 全部指標表格 =========
+            st.subheader("Table")
+            table_df = pd.DataFrame(
+                {
+                    "Metric": list(stats.keys()),
+                    "Value": [
+                        f"{stats['Total Return']*100:,.2f} %",
+                        f"{stats['CAGR']*100:,.2f} %",
+                        f"{stats['Vol']*100:,.2f} %",
+                        f"{stats['Sharpe']:,.2f}",
+                        f"{stats['Sortino']:,.2f}",
+                        f"{stats['MaxDD']*100:,.2f} %",
+                    ],
+                }
+            )
+            st.table(table_df)
 else:
     st.info("Set params and click Run.")
